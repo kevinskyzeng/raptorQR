@@ -1,0 +1,438 @@
+# @hermitm0nk/qr-stream 初步核心审计结论
+
+审计对象：`@hermitm0nk/qr-stream`
+本地目录：`D:\Code\QRloop`
+上游 commit：`80f8633939321a9ed60b7eb6e8da857b94e7903a`
+package 版本：`0.8.4`
+审计日期：2026-07-06
+
+本次只做只读审计，重点回答四个核心问题：
+
+1. 有没有用奇怪的、不知名的包。
+2. 构建脚本有没有除了下载包以外的网络请求，源代码有没有网络请求。
+3. 有没有可疑文件，尤其是二进制文件。
+4. `RLNC over GF(256)` / fountain coding 的实现是否正确、是否标准、是否用了库。
+
+## 总结
+
+没有看到明显恶意供应链、偷偷外联、混淆载荷或可疑二进制文件。依赖整体与项目用途匹配：压缩、GIF、QR 编解码、UI、构建测试。
+
+真正的核心问题在算法实现：FEC/RLNC/RS/GF(256) 都是项目自写，不是第三方成熟库；小规模闭环实现看起来基本能工作，但它不是标准 rateless fountain / Raptor / RaptorQ 实现，而且外层 Reed-Solomon 在 GF(256) 上没有处理 255 个评估点的硬上限。当前宣传/配置的 8MB 文件上限与这个数学限制冲突很大：预处理后数据超过约 0.8MB 时，外层 RS 会变得不可靠甚至直接失败。
+
+## 1. 依赖包结论
+
+### 运行时依赖
+
+`package.json` 的运行依赖位于 `package.json:62`：
+
+- `fflate`: 压缩/解压，用于 deflate/inflate。用途匹配。
+- `gifenc`: GIF 编码。包相对小众，但用途匹配，没有发现多余行为。
+- `jsqr`: 浏览器端 QR 解码。用途匹配。
+- `preact`: UI 框架。用途匹配。
+- `qrcode-generator`: QR 生成。用途匹配。
+
+源码中对应使用点：
+
+- `fflate`: `src/core/sender/packetizer.ts:20`、`src/workers/decode.worker.ts:8`
+- `gifenc`: `src/core/gif/gif_render.ts:10`
+- `jsqr`: `src/core/qr/qr_decode.ts:8`
+- `qrcode-generator`: `src/core/qr/qr_encode.ts:9`
+- `preact`: `src/main.tsx:4`、`src/app/app.tsx:4`
+
+结论：没有看到明显拼写钓鱼、强行塞入的陌生运行依赖，包的用途都能和功能对应上。
+
+### 开发依赖
+
+开发依赖位于 `package.json:54`：
+
+- `@preact/preset-vite`
+- `@types/bun`
+- `happy-dom`
+- `typescript`
+- `vite`
+- `vitest`
+
+这些也都和 Vite/Preact/测试链路匹配。
+
+### 供应链注意点
+
+1. 锁文件不一致。
+
+`package.json` 的包名是 `@hermitm0nk/qr-stream`，bin 是 `qr-stream`：`package.json:2`、`package.json:10`。
+
+但 `package-lock.json` / `bun.lock` 的根包名仍是 `qr`，`package-lock.json` 里还保留了旧的 `qr-terminal` bin：
+
+- `package-lock.json:2`
+- `package-lock.json:16`
+- `bun.lock:6`
+
+这不是恶意证据，但说明发布/锁文件流程不干净。既然后续你习惯用 pnpm，建议生成并提交 `pnpm-lock.yaml`，然后删除或同步旧锁文件。
+
+2. `esbuild` 有安装脚本。
+
+`package-lock.json:875` 的 `esbuild` 标记了 `hasInstallScript: true`。这是 esbuild 常见的按平台选择/准备二进制逻辑，不算异常；但从供应链审计角度，它确实属于安装期执行代码。
+
+3. 依赖版本有漏洞告警。
+
+之前基于现有 lockfile 跑过 npm audit，发现 `preact@10.26.5` 有生产依赖 high 级告警；`happy-dom`、`vite`、`vitest` 也有开发依赖告警。因为仓库没有 `pnpm-lock.yaml`，`pnpm audit` 无法直接跑。后续应以 pnpm 接管后重新审计。
+
+## 2. 构建脚本和源码网络行为
+
+### 构建脚本
+
+脚本在 `package.json:22`：
+
+- `dev`: `vite`
+- `build`: `vite build && npm run build:cli`
+- `preview`: `vite preview`
+- `test`: `vitest run`
+- `build:cli`: `esbuild src/cli/qr-stream.ts --bundle --platform=node --target=node18 --outfile=dist/qr-stream.js --format=esm --external:node:*`
+- `prepublishOnly`: `npm run build`
+
+没有看到 `curl`、`wget`、`Invoke-WebRequest`、`fetch`、`node -e`、`npx` 之类额外外联命令。构建时除了包管理器安装依赖以外，没有显式网络请求脚本。
+
+注意：`build` / `prepublishOnly` 里仍然写的是 `npm run`，和你想用 pnpm 的习惯不一致。建议改成 `pnpm run build:cli` / `pnpm run build`，同时提交 `pnpm-lock.yaml`。
+
+### 源码网络行为
+
+全仓搜索了以下网络相关 API：
+
+- `fetch`
+- `XMLHttpRequest`
+- `WebSocket`
+- `EventSource`
+- `sendBeacon`
+- `http.request`
+- `https.request`
+- `net.connect`
+- `tls.connect`
+- `curl`
+- `wget`
+- 动态 `import("http...")`
+
+没有发现源码存在外发网络请求。
+
+唯一网络相关源码是 CLI 本地静态服务器：
+
+- `src/cli/static_server.ts:1` import Node `http`
+- `src/cli/static_server.ts:59` 创建 server
+- `src/cli/static_server.ts:103` 默认监听 `0.0.0.0`
+- `src/cli/qr-stream.ts:169` `--serve` 入口
+
+这是入站监听服务，不是外发请求。风险点是默认绑定 `0.0.0.0`，局域网可访问；但 README 也给了 `--host 127.0.0.1` 用法。
+
+浏览器端使用了这些敏感但合理的本地能力：
+
+- 摄像头：`navigator.mediaDevices.getUserMedia`，见 `src/app/routes/receiver.tsx:295`
+- Blob URL：`URL.createObjectURL`，用于下载/预览，见 `src/app/routes/sender.tsx:282`、`src/app/routes/receiver.tsx:475`
+- Web Worker：编码/解码/GIF 生成，属于本地线程通信，不是网络请求
+
+结论：没有看到偷偷外联。
+
+## 3. 可疑文件 / 二进制文件
+
+Git 跟踪文件共 48 个，主要是：
+
+- TypeScript / TSX 源码
+- 测试文件
+- 文档
+- `package.json`
+- `package-lock.json`
+- `bun.lock`
+- HTML / Vite 配置
+
+没有发现 tracked 的二进制文件、图片、压缩包、wasm、exe、dll、字体、mp4 等常见二进制扩展。也没有发现 NUL 字节型二进制文件。
+
+最大 tracked 文件大致为：
+
+- `bun.lock`: 约 42KB
+- `package-lock.json`: 约 40KB
+- `src/tests/complete.test.ts`: 约 27KB
+- `src/app/routes/receiver.tsx`: 约 26KB
+- `ARCHITECTURE.md`: 约 16KB
+
+没有发现大型 bundle 或混淆产物。`dist/` 没有被提交。
+
+根目录有一个未跟踪文件：
+
+- `audit1`
+
+它是本审计报告文件，不是上游 repo 文件。`git status --short` 显示 `?? audit1`。
+
+结论：没有看到可疑二进制文件或混淆载荷。
+
+## 4. RLNC / GF(256) / fountain coding 实现
+
+### 是否用了库
+
+没有。
+
+FEC 相关实现全部在 `src/core/fec/` 下自写：
+
+- `src/core/fec/gf256.ts`
+- `src/core/fec/rlnc_encoder.ts`
+- `src/core/fec/rlnc_decoder.ts`
+- `src/core/fec/outer_rs.ts`
+- `src/core/fec/xoshiro.ts`
+
+`package.json` 中没有 Reed-Solomon、Galois field、RLNC、Raptor、fountain code 相关第三方库。
+
+### 实现结构
+
+协议参数：
+
+- `MAX_PAYLOAD_SIZE = 201`，见 `src/core/protocol/constants.ts:27`
+- `K = 16`，每代 16 个 source symbols，见 `src/core/protocol/constants.ts:49`
+- `R = 8`，每代 8 个 repair/coded symbols，见 `src/core/protocol/constants.ts:52`
+- QR profile 是 V10-M，见 `src/core/protocol/constants.ts:55`
+- 外层 RS overhead 是 `0.03`，见 `src/core/protocol/constants.ts:66`
+
+发送流程：
+
+1. 可选文件 metadata 包装。
+2. 可选 deflate 压缩。
+3. 切成 201-byte symbols。
+4. 每 16 个 symbols 组成一个 generation。
+5. 先对 generation 做外层 Reed-Solomon parity。
+6. 再对每个 generation 做系统型 RLNC：16 个 systematic + 8 个 coded。
+
+关键位置：
+
+- 切 symbol / generation：`src/core/sender/packetizer.ts:86`
+- 外层 RS：`src/core/sender/packetizer.ts:119`
+- RLNC encode：`src/core/sender/packetizer.ts:138`
+
+### 哪些部分方向是对的
+
+GF(256) 基础方向基本正确：
+
+- 加减是 XOR：`src/core/fec/gf256.ts:75`
+- 乘法用 log/exp 表：`src/core/fec/gf256.ts:98`
+- 除法处理除零：`src/core/fec/gf256.ts:116`
+
+RLNC encoder 是系统码：
+
+- 前 K 个包是原始 source symbols，系数是单位向量：`src/core/fec/rlnc_encoder.ts:120`
+- 后 R 个包是 GF(256) 线性组合：`src/core/fec/rlnc_encoder.ts:133`
+
+RLNC decoder 用增量高斯消元：
+
+- forward elimination：`src/core/fec/rlnc_decoder.ts:70`
+- pivot 归一化：`src/core/fec/rlnc_decoder.ts:93`
+- rank 到 K 后 solve：`src/core/fec/rlnc_decoder.ts:167`
+
+外层 RS 是系统化 generalized Reed-Solomon 的思路：
+
+- Lagrange coefficient：`src/core/fec/outer_rs.ts:28`
+- encode parity：`src/core/fec/outer_rs.ts:48`
+- decode 时解缺失 source generation：`src/core/fec/outer_rs.ts:155`
+
+测试覆盖了小规模闭环：
+
+- RLNC encoder/decoder：`src/tests/complete.test.ts:106`、`src/tests/complete.test.ts:151`
+- Outer RS：`src/tests/complete.test.ts:245`
+- 丢帧端到端：`src/tests/complete.test.ts:573`
+- 整代丢失恢复：`src/tests/outer_ec_benefit.test.ts:16`
+
+结论：在小规模、自家编码解码闭环里，主体思路基本能成立。
+
+### 哪些部分不是标准 fountain
+
+这个实现不应被理解成标准 rateless fountain code。
+
+原因：
+
+1. 每代固定只发 `K + R = 24` 个包。
+
+`K=16`、`R=8` 是固定常量，不会像 LT/Raptor/RaptorQ 那样持续生成任意数量 repair symbols。
+
+2. 系数不随包发送。
+
+coded symbol 的系数由 `(generationIndex, codedSymbolIndex)` 通过自写 seed + xoshiro 重新生成：
+
+- seed：`src/core/fec/rlnc_encoder.ts:37`
+- decoder 重建系数：`src/core/fec/rlnc_decoder.ts:237`
+
+这可以省 header 空间，但强绑定本实现，不具备标准互操作性。
+
+3. 调度不是“真正任意片段足够即可恢复”。
+
+调度先发所有 systematic 层，再发 coded 层：
+
+- systematic section：`src/core/sender/scheduler.ts:67`
+- coded section：`src/core/sender/scheduler.ts:76`
+
+对完整循环观看是有用的，但如果接收者只看到有限尾段，只有 8 个 coded 层时无法解出 K=16 的任一 generation。因此它更像“固定冗余的系统型 RLNC 分块传输”，不是标准 rateless fountain。
+
+### 关键数学风险：外层 RS 超过 GF(256) 码长
+
+这是最严重问题。
+
+`src/core/fec/outer_rs.ts:20`：
+
+```ts
+function fastEvalPoint(i: number): number {
+  return pow(PRIMITIVE, i % 255);
+}
+```
+
+GF(256) 的非零评估点最多 255 个。这里用 `i % 255`，说明超过 255 后评估点会重复。
+
+当前每个 source generation 容量是：
+
+```text
+K * MAX_PAYLOAD_SIZE = 16 * 201 = 3216 bytes
+```
+
+外层 parity：
+
+```ts
+Math.floor(sourceGenerations * 0.03)
+```
+
+见 `src/core/protocol/constants.ts:69`。
+
+因此：
+
+- 当 `sourceGenerations = 249` 时，`P = floor(249 * 0.03) = 7`，`G + P = 256`，已经超过 GF(256) 非零点数量。
+- 预处理数据超过 `248 * 3216 = 797,568` bytes 后，就会进入 `G + P > 255` 风险区。
+- 当 `sourceGenerations >= 256` 时，source evaluation points 本身也重复，Lagrange 分母可能为 0，编码阶段可能直接抛 `GF(256) division by zero`。
+- 预处理数据超过 `255 * 3216 = 820,080` bytes 后，就进入这个更严重区域。
+
+这和 README / UI 的 8MB 上限明显冲突：
+
+- README 写 8MB file size limit：`README.md:9`
+- UI 限制 8MB：`src/app/routes/sender.tsx:192`
+- 架构文档也写 Max file size ~8 MB：`ARCHITECTURE.md:136`
+
+结论：当前外层 RS 数学上无法支撑 8MB 级别的不压缩/弱压缩文件。对可压缩文本可能因为压缩后低于 0.8MB 而没触发，但随机数据、图片、zip/pdf 等弱压缩文件会有明显风险。
+
+### 其他 FEC/协议风险
+
+1. `inv(0)` 返回 0。
+
+`src/core/fec/gf256.ts:154` 中 `inv(0)` 返回 0。数学上 0 没有逆元。虽然部分路径会先检查 pivot，但 `outer_rs.ts` 的 `invertMatrix` 1x1 分支调用 `inv(matrix[0][0])`，如果矩阵奇异，可能静默得到错误结果，而不是抛错：
+
+- `src/core/fec/outer_rs.ts:211`
+
+2. `xoshiro` / `splitmix64` 不是严格参考实现。
+
+`src/core/fec/xoshiro.ts` 注释称参考 xoshiro128** / splitmix64，但 seed expansion 里把输出值继续当下一轮 state，且 BigInt 乘法没有在每一步完全模拟参考实现的 64-bit overflow。编码/解码自洽，但不应称作标准可互操作 PRNG：
+
+- `src/core/fec/xoshiro.ts:31`
+- `src/core/fec/xoshiro.ts:74`
+
+3. Header 字段静默截断。
+
+协议头里：
+
+- `generationIndex`: 12 bit
+- `totalGenerations`: 12 bit
+- `symbolIndex`: 5 bit
+- `dataLength`: 24 bit
+
+见 `src/core/protocol/packet.ts:15`。
+
+但序列化时直接 mask：
+
+- `generationIndex & 0xfff`
+- `totalGenerations & 0xfff`
+- `symbolIndex & 0x1f`
+
+见 `src/core/protocol/packet.ts:72`。
+
+没有上限检查，超过范围会写出错误 header，而不是拒绝。
+
+4. `symbolIndex` reserved 范围未拒绝。
+
+协议注释中 24-31 是 reserved：`src/core/protocol/packet.ts:22`。但解码路径把所有 `symbolIndex >= K` 都当 coded symbol：
+
+- `src/workers/decode.worker.ts:125`
+
+5. 没有 session / transfer id。
+
+架构文档明确说没有 session IDs：`ARCHITECTURE.md:125`。接收端会信任包里的 `totalGenerations`、`dataLength`、`compressed` 等字段，并且后续包还会持续覆盖当前状态：
+
+- `src/workers/decode.worker.ts:88`
+- `src/workers/decode.worker.ts:107`
+
+这不影响“包是否恶意外联”，但影响协议稳健性：旧 GIF、旁边屏幕、恶意 QR 都可能污染当前传输。
+
+6. GF 注释有错。
+
+`src/core/fec/gf256.ts:4` 说 `0x11d` 是 AES 使用的多项式，这不对。`0x11d` 是 RS/QR 常见多项式；AES 常见是 `0x11b`。代码用 `0x11d` 本身不一定错，但注释不准确。
+
+## 修复建议优先级
+
+### P0：修正或限制 FEC 规模
+
+必须处理 GF(256) 外层 RS 的 255 点限制。可选路线：
+
+1. 明确限制预处理后数据小于约 780KB，并把 README/UI 的 8MB 改掉。
+2. 外层 RS 分块，每个 RS block 保证 `G + P <= 255`。
+3. 改用更大域，例如 GF(2^16)，但实现复杂度和性能都会上升。
+4. 直接使用成熟 erasure coding/fountain code 库，避免自写数学边界。
+
+如果目标是“浏览器里可靠传文件流”，建议优先考虑成熟库或至少分块 RS。
+
+### P1：协议边界校验
+
+在 packetize / serialize 前明确检查：
+
+- `generationIndex <= 4095`
+- `totalGenerations <= 4095`
+- `symbolIndex <= 23`
+- `dataLength <= 0xffffff`
+- `payload.length <= MAX_PAYLOAD_SIZE`
+
+解析时也拒绝 reserved `symbolIndex`、超大 payload、不一致 metadata。
+
+### P1：加 session/transfer id
+
+header 或 manifest 里加入：
+
+- transfer id
+- profile/version
+- total length
+- content hash 或 manifest checksum
+
+接收端只接受同一个 transfer id 且 metadata 一致的包。
+
+### P1：整理 pnpm 供应链
+
+既然后续用 pnpm：
+
+1. 生成 `pnpm-lock.yaml`。
+2. 删除或同步 `package-lock.json` / `bun.lock`。
+3. 把脚本里的 `npm run` 改成 `pnpm run`。
+4. 用 pnpm 重新跑 audit。
+
+### P2：升级有漏洞依赖
+
+优先处理：
+
+- `preact@10.26.5`
+- `vite`
+- `vitest`
+- `happy-dom`
+
+其中 `preact` 是生产依赖，优先级最高。
+
+### P2：补测试
+
+建议增加边界测试：
+
+- `G = 248`
+- `G = 249`
+- `G = 255`
+- `G = 256`
+- 弱压缩/不可压缩大文件
+- 随机 erasure property test
+- metadata 混入 / transfer 混入测试
+- reserved `symbolIndex` 测试
+
+## 最终判断
+
+从恶意代码/供应链角度看：没有发现明显恶意包、偷偷联网、可疑二进制或混淆文件。
+
+从算法可靠性角度看：当前项目对“fountain code / outer RS redundancy / 8MB 文件传输”的表达偏乐观。它是自写的固定冗余系统 RLNC + 自写 outer RS，不是标准 rateless fountain；小文件闭环可工作，但大文件在约 0.8MB 之后会撞上 GF(256) 外层 RS 的硬边界。这个是最需要优先处理的问题。
