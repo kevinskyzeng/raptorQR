@@ -272,6 +272,10 @@ def default_output_dir(repo_root: Path | None) -> Path:
 
 
 def ensure_rust_toolchain() -> None:
+    # Colab Ubuntu images typically ship without build-essential (cc / ld).
+    # wasm-pack itself must compile proc-macro crates, which require a C linker.
+    run_shell("apt-get install -y -q build-essential")
+
     if shutil.which("rustup"):
         cargo_bin = Path.home() / ".cargo" / "bin"
         os.environ["PATH"] = f"{cargo_bin}{os.pathsep}{os.environ['PATH']}"
