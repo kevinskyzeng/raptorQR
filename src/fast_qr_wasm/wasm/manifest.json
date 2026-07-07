@@ -1,0 +1,12 @@
+{
+  "package": "qrstream_fast_qr_wasm",
+  "fast_qr": "0.13",
+  "builtAt": null,
+  "target": "web",
+  "outputs": [
+    "manifest.json",
+    "qrstream_fast_qr_wasm.d.ts",
+    "qrstream_fast_qr_wasm.js"
+  ],
+  "note": "Stub only. Run build_fast_qr_wasm_colab.py to produce real artifacts and replace these files."
+}

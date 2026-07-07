@@ -5,6 +5,7 @@ import { useState, useCallback, useEffect, useRef } from 'preact/hooks';
 import { generateQRMatrix } from '@/core/qr/qr_encode';
 import type { EccLevel } from '@/core/qr/qr_encode';
 import { rasterizeQR } from '@/core/qr/frame_raster';
+import { QrWorkerPool } from '@/core/qr/qr_worker_pool';
 import {
   DEFAULT_QR_ECC_LEVEL,
   DEFAULT_QR_VERSION,
@@ -259,19 +260,24 @@ export function SenderPage() {
   const liveTransferRef = useRef<LiveTransfer | null>(null);
   const encodeWorkerRef = useRef<Worker | null>(null);
   const gifWorkerRef = useRef<Worker | null>(null);
-  const playbackTimerRef = useRef<number | null>(null);
+  const rafHandleRef = useRef<number | null>(null);
+  const rafLastTsRef = useRef<number | null>(null);
+  const rafAccRef = useRef(0);
   const liveFrameIndexRef = useRef(0);
   const frameRateFpsRef = useRef(DEFAULT_FRAME_RATE_FPS);
   const frameCacheRef = useRef<FrameCache>(createFrameCache());
+  const poolRef = useRef<QrWorkerPool | null>(null);
   const runIdRef = useRef(0);
   const qrProfile = createQRTransferProfile(qrVersion, eccLevel);
   const frameDelayMs = frameRateToDelayMs(frameRateFps);
 
   const clearPlaybackTimer = useCallback(() => {
-    if (playbackTimerRef.current !== null) {
-      window.clearTimeout(playbackTimerRef.current);
-      playbackTimerRef.current = null;
+    if (rafHandleRef.current !== null) {
+      cancelAnimationFrame(rafHandleRef.current);
+      rafHandleRef.current = null;
     }
+    rafLastTsRef.current = null;
+    rafAccRef.current = 0;
   }, []);
 
   const terminateEncodeWorker = useCallback(() => {
@@ -284,26 +290,53 @@ export function SenderPage() {
     gifWorkerRef.current = null;
   }, []);
 
-  const scheduleNextLiveFrame = useCallback(() => {
-    clearPlaybackTimer();
-    const delayMs = frameRateToDelayMs(frameRateFpsRef.current);
+  // rAF loop — driven by `requestAnimationFrame` with a time accumulator so the
+  // logical frame rate is independent of the display refresh rate.  We advance
+  // the QR frame index once per elapsed `frameInterval` ms, then fire all tile
+  // renders in parallel via the pool.  The pool calls are fire-and-forget: they
+  // populate `frameCacheRef` so future ticks can draw instantly from cache.
+  const runRafLoop = useCallback((timestamp: number) => {
+    const transfer = liveTransferRef.current;
+    const canvas = canvasRef.current;
+    if (!transfer || !canvas) {
+      rafHandleRef.current = null;
+      return;
+    }
 
-    playbackTimerRef.current = window.setTimeout(() => {
-      const transfer = liveTransferRef.current;
-      const canvas = canvasRef.current;
-      if (!transfer || !canvas) return;
+    const last = rafLastTsRef.current;
+    if (last !== null) {
+      const delta = timestamp - last;
+      rafAccRef.current += delta;
+      const frameInterval = 1000 / frameRateFpsRef.current;
 
-      try {
+      // Consume whole frame slots from the accumulator.
+      // Cap at 2 slots to avoid spiral-of-death after a long pause.
+      let advanced = 0;
+      while (rafAccRef.current >= frameInterval && advanced < 2) {
+        rafAccRef.current -= frameInterval;
+        advanced++;
+
         const frameIndex = liveFrameIndexRef.current % transfer.displayFrameCount;
-        drawLiveFrame(canvas, transfer, frameIndex, frameCacheRef.current);
+
+        // Draw from cache if available; otherwise sync JS fallback.
+        try {
+          drawLiveFrame(canvas, transfer, frameIndex, frameCacheRef.current, poolRef.current);
+        } catch (err: unknown) {
+          rafHandleRef.current = null;
+          rafLastTsRef.current = null;
+          rafAccRef.current = 0;
+          setError((err instanceof Error ? err.message : null) ?? String(err));
+          return;
+        }
+
         liveFrameIndexRef.current = (frameIndex + 1) % transfer.displayFrameCount;
-        scheduleNextLiveFrame();
-      } catch (err: any) {
-        clearPlaybackTimer();
-        setError(err.message ?? String(err));
       }
-    }, delayMs);
-  }, [clearPlaybackTimer]);
+    }
+
+    rafLastTsRef.current = timestamp;
+    rafHandleRef.current = requestAnimationFrame(runRafLoop);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const startLivePlayback = useCallback((resetIndex: boolean) => {
     clearPlaybackTimer();
@@ -316,11 +349,17 @@ export function SenderPage() {
       liveFrameIndexRef.current = 0;
     }
 
+    // Draw the first frame immediately so the canvas isn't blank.
     const frameIndex = liveFrameIndexRef.current % transfer.displayFrameCount;
-    drawLiveFrame(canvas, transfer, frameIndex, frameCacheRef.current);
+    try {
+      drawLiveFrame(canvas, transfer, frameIndex, frameCacheRef.current, poolRef.current);
+    } catch {
+      // Non-fatal — rAF loop will catch on next tick.
+    }
     liveFrameIndexRef.current = (frameIndex + 1) % transfer.displayFrameCount;
-    scheduleNextLiveFrame();
-  }, [clearPlaybackTimer, scheduleNextLiveFrame]);
+
+    rafHandleRef.current = requestAnimationFrame(runRafLoop);
+  }, [clearPlaybackTimer, runRafLoop]);
 
   useEffect(() => {
     frameRateFpsRef.current = frameRateFps;
@@ -339,12 +378,19 @@ export function SenderPage() {
     frameCacheRef.current.frames.clear();
 
     if (liveTransfer) {
+      // Spin up a worker pool sized to the number of parallel QR tiles.
+      poolRef.current?.terminate();
+      poolRef.current = new QrWorkerPool(liveTransfer.parallelCount);
       startLivePlayback(true);
     } else {
       clearPlaybackTimer();
+      poolRef.current?.terminate();
+      poolRef.current = null;
     }
 
-    return clearPlaybackTimer;
+    return () => {
+      clearPlaybackTimer();
+    };
   }, [liveTransfer, clearPlaybackTimer, startLivePlayback]);
 
   /** Wipe all output state and stop any live playback loop. */
@@ -353,6 +399,8 @@ export function SenderPage() {
     terminateEncodeWorker();
     terminateGifWorker();
     clearPlaybackTimer();
+    poolRef.current?.terminate();
+    poolRef.current = null;
     liveTransferRef.current = null;
     liveFrameIndexRef.current = 0;
     frameCacheRef.current.frames.clear();
@@ -980,6 +1028,7 @@ function drawLiveFrame(
   transfer: LiveTransfer,
   frameIndex: number,
   cache: FrameCache,
+  pool: QrWorkerPool | null,
 ): void {
   if (canvas.width !== transfer.width) canvas.width = transfer.width;
   if (canvas.height !== transfer.height) canvas.height = transfer.height;
@@ -994,10 +1043,41 @@ function drawLiveFrame(
   for (let tileIndex = 0; tileIndex < transfer.parallelCount; tileIndex++) {
     const packetIndex = getPacketIndexForDisplayFrame(transfer, frameIndex, tileIndex);
     if (packetIndex === null) continue;
-    const image = getLivePacketImage(transfer, packetIndex, cache);
-    const x = (tileIndex % transfer.columns) * transfer.tileWidth;
-    const y = Math.floor(tileIndex / transfer.columns) * transfer.tileHeight;
-    ctx.putImageData(image, x, y);
+
+    const cached = cache.frames.get(packetIndex % transfer.packets.length);
+    if (cached) {
+      // Cache hit — draw synchronously.
+      const x = (tileIndex % transfer.columns) * transfer.tileWidth;
+      const y = Math.floor(tileIndex / transfer.columns) * transfer.tileHeight;
+      ctx.putImageData(cached, x, y);
+    } else {
+      // Cache miss — use JS fallback synchronously for this frame, and
+      // simultaneously fire an async pool render to warm the cache.
+      const image = getLivePacketImage(transfer, packetIndex, cache);
+      const x = (tileIndex % transfer.columns) * transfer.tileWidth;
+      const y = Math.floor(tileIndex / transfer.columns) * transfer.tileHeight;
+      ctx.putImageData(image, x, y);
+
+      // Pre-render next occurrence of this packet via the pool.
+      if (pool !== null) {
+        const cacheKey = packetIndex % transfer.packets.length;
+        const packet = transfer.packets[cacheKey];
+        if (packet) {
+          pool
+            .render(packet.slice(), transfer.version, transfer.eccLevel, transfer.scale)
+            .then((imageData) => {
+              cache.frames.set(cacheKey, imageData);
+              if (cache.frames.size > cache.maxEntries) {
+                const oldest = cache.frames.keys().next().value;
+                if (oldest !== undefined) cache.frames.delete(oldest);
+              }
+            })
+            .catch(() => {
+              // Pool render failed — JS fallback will be used on next pass.
+            });
+        }
+      }
+    }
   }
 }
 
