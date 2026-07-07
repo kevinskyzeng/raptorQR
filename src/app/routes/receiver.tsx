@@ -384,13 +384,7 @@ export function ReceiverPage() {
         const capabilities = track.getCapabilities() as any;
         if (capabilities?.zoom) {
           setHasZoomSupport(true);
-          const idealZoom = Math.min(2, capabilities.zoom.max ?? 2);
-          try {
-            await track.applyConstraints({ advanced: [{ zoom: idealZoom }] } as any);
-            setZoomLevel(idealZoom);
-          } catch {
-            // ignore
-          }
+          setZoomLevel(1);
         } else {
           setHasZoomSupport(false);
           setZoomLevel(1);
@@ -511,7 +505,7 @@ export function ReceiverPage() {
   }, []);
 
 
-  // ── Capture frame from camera (software crop + optional camera zoom) ───────
+  // ── Capture the full camera frame ─────────────────────────────────────────
   const captureFrame = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -538,20 +532,11 @@ export function ReceiverPage() {
     canvas.width = cw;
     canvas.height = ch;
 
-    // Crop region: center 50% of the frame (2× software zoom)
-    // If camera zoom is active, the video already shows a zoomed view,
-    // so we crop less aggressively.
-    const cropRatio = zoomLevel > 1 ? 0.6 : 0.5;
-    const cropW = vw * cropRatio;
-    const cropH = vh * cropRatio;
-    const sx = (vw - cropW) / 2;
-    const sy = (vh - cropH) / 2;
-
-    ctx.drawImage(video, sx, sy, cropW, cropH, 0, 0, cw, ch);
+    ctx.drawImage(video, 0, 0, vw, vh, 0, 0, cw, ch);
     const imageData = ctx.getImageData(0, 0, cw, ch);
 
     worker.postMessage({ type: 'frame', imageData, realtime: true });
-  }, [zoomLevel]);
+  }, []);
 
   // ── Download recovered file ──────────────────────────────────────────────
   const handleDownload = useCallback(() => {
@@ -634,21 +619,17 @@ export function ReceiverPage() {
             <div
               style={{
                 position: 'absolute',
-                top: '25%',
-                left: '25%',
-                width: '50%',
-                height: '50%',
+                inset: 0,
                 border: '2px dashed rgba(88, 166, 255, 0.7)',
                 borderRadius: 8,
                 pointerEvents: 'none',
-                boxShadow: '0 0 0 9999px rgba(0,0,0,0.35)',
               }}
             />
             {/* Corner markers */}
-            <div style={{ position: 'absolute', top: '25%', left: '25%', width: 16, height: 16, borderTop: '3px solid #58a6ff', borderLeft: '3px solid #58a6ff', pointerEvents: 'none' }} />
-            <div style={{ position: 'absolute', top: '25%', right: '25%', width: 16, height: 16, borderTop: '3px solid #58a6ff', borderRight: '3px solid #58a6ff', pointerEvents: 'none' }} />
-            <div style={{ position: 'absolute', bottom: '25%', left: '25%', width: 16, height: 16, borderBottom: '3px solid #58a6ff', borderLeft: '3px solid #58a6ff', pointerEvents: 'none' }} />
-            <div style={{ position: 'absolute', bottom: '25%', right: '25%', width: 16, height: 16, borderBottom: '3px solid #58a6ff', borderRight: '3px solid #58a6ff', pointerEvents: 'none' }} />
+            <div style={{ position: 'absolute', top: 0, left: 0, width: 16, height: 16, borderTop: '3px solid #58a6ff', borderLeft: '3px solid #58a6ff', pointerEvents: 'none' }} />
+            <div style={{ position: 'absolute', top: 0, right: 0, width: 16, height: 16, borderTop: '3px solid #58a6ff', borderRight: '3px solid #58a6ff', pointerEvents: 'none' }} />
+            <div style={{ position: 'absolute', bottom: 0, left: 0, width: 16, height: 16, borderBottom: '3px solid #58a6ff', borderLeft: '3px solid #58a6ff', pointerEvents: 'none' }} />
+            <div style={{ position: 'absolute', bottom: 0, right: 0, width: 16, height: 16, borderBottom: '3px solid #58a6ff', borderRight: '3px solid #58a6ff', pointerEvents: 'none' }} />
           </div>
           <canvas ref={canvasRef} style={{ display: 'none' }} />
 
@@ -711,8 +692,8 @@ export function ReceiverPage() {
           </div>
           <p style={{ fontSize: 12, color: '#8b949e', marginTop: 6 }}>
             {hasZoomSupport
-              ? 'Camera zoom is active. The dashed square shows the scan region.'
-              : 'Software crop is applied to the center 50% of the frame (dashed square).'}
+              ? 'Full-frame scan is active. Use Zoom only if the QR codes are too small.'
+              : 'Full-frame scan is active.'}
           </p>
           {error && <div style={S.warn}>⚠ {error}</div>}
         </div>

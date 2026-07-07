@@ -19,13 +19,14 @@ export interface QrDecodeResult {
 
 const READER_OPTIONS: ReaderOptions = {
   formats: ['QRCode'],
-  maxNumberOfSymbols: 1,
   tryHarder: true,
   tryRotate: false,
   tryInvert: true,
   tryDownscale: true,
   textMode: 'Plain',
 };
+
+const DEFAULT_MAX_QR_SYMBOLS = 4;
 
 let preparePromise: Promise<unknown> | null = null;
 
@@ -40,7 +41,17 @@ let preparePromise: Promise<unknown> | null = null;
 export function decodeQRFromCanvas(
   imageData: ImageData,
 ): Promise<QrDecodeResult | null> {
-  return decodeImageData(imageData);
+  return decodeImageData(imageData, 1).then((results) => results[0] ?? null);
+}
+
+/**
+ * Decode up to `maxSymbols` QR codes from an `ImageData` object.
+ */
+export function decodeQRCodesFromCanvas(
+  imageData: ImageData,
+  maxSymbols: number = DEFAULT_MAX_QR_SYMBOLS,
+): Promise<QrDecodeResult[]> {
+  return decodeImageData(imageData, maxSymbols);
 }
 
 /**
@@ -77,19 +88,26 @@ export function decodeQRFromBuffer(
     rgba[off + 3] = 255; // A
   }
 
-  return decodeImageData(new ImageData(rgba, width, height));
+  return decodeImageData(new ImageData(rgba, width, height), 1)
+    .then((results) => results[0] ?? null);
 }
 
-async function decodeImageData(imageData: ImageData): Promise<QrDecodeResult | null> {
+async function decodeImageData(
+  imageData: ImageData,
+  maxSymbols: number,
+): Promise<QrDecodeResult[]> {
   await prepareReader();
-  const results = await readBarcodes(imageData, READER_OPTIONS);
-  const result = results.find((item) => item.isValid && item.symbology === 'QRCode');
-  if (!result || result.bytes.length === 0) return null;
+  const results = await readBarcodes(imageData, {
+    ...READER_OPTIONS,
+    maxNumberOfSymbols: clampMaxSymbols(maxSymbols),
+  });
 
-  return {
-    bytes: new Uint8Array(result.bytes),
-    version: parseQRVersion(result.version, result.extra),
-  };
+  return results
+    .filter((item) => item.isValid && item.symbology === 'QRCode' && item.bytes.length > 0)
+    .map((result) => ({
+      bytes: new Uint8Array(result.bytes),
+      version: parseQRVersion(result.version, result.extra),
+    }));
 }
 
 function prepareReader(): Promise<unknown> {
@@ -124,4 +142,9 @@ function parseQRVersion(version: string, extra: string): number {
   }
 
   return 0;
+}
+
+function clampMaxSymbols(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_MAX_QR_SYMBOLS;
+  return Math.min(DEFAULT_MAX_QR_SYMBOLS, Math.max(1, Math.round(value)));
 }

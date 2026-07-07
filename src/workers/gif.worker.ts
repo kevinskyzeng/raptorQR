@@ -11,6 +11,8 @@ import { rasterizeQR } from '@/core/qr/frame_raster';
 import { createQRGif } from '@/core/gif/gif_render';
 import { QR_VERSION, ECC_LEVEL, FRAME_DELAY_MS } from '@/core/protocol/constants';
 
+type ParallelQRCount = 1 | 2 | 4;
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 interface GenerateInput {
@@ -19,6 +21,7 @@ interface GenerateInput {
   frameDelayMs?: number;
   qrVersion?: number;
   eccLevel?: EccLevel;
+  parallelCount?: number;
 }
 
 interface GifOutput {
@@ -53,6 +56,7 @@ function handleGenerate(input: GenerateInput): GifOutput {
   const frameDelayMs = normalizeFrameDelayMs(input.frameDelayMs);
   const qrVersion = normalizeQRVersion(input.qrVersion);
   const eccLevel = normalizeEccLevel(input.eccLevel);
+  const parallelCount = normalizeParallelQRCount(input.parallelCount);
 
   const moduleCount = qrVersion * 4 + 17;
 
@@ -61,21 +65,30 @@ function handleGenerate(input: GenerateInput): GifOutput {
   const quietModules = 8; // 4 on each side
   const totalModules = moduleCount + quietModules;
   const scale = Math.max(2, Math.round(targetPx / totalModules));
+  const tileSize = totalModules * scale;
+  const layout = getParallelLayout(parallelCount);
 
   // ─── Generate QR matrix for each packet ─────────────────────────────────────────
   const frames: Uint8Array[] = [];
-  let width = 0;
-  let height = 0;
+  const width = tileSize * layout.columns;
+  const height = tileSize * layout.rows;
+  const frameCount = packets.length;
 
-  for (let i = 0; i < packets.length; i++) {
-    const packet = packets[i]!;
-    const matrix = generateQRMatrix(packet, qrVersion, eccLevel);
-    const imageData = rasterizeQR(matrix, scale);
-    if (i === 0) {
-      width = imageData.width;
-      height = imageData.height;
+  for (let frameIndex = 0; frameIndex < frameCount; frameIndex++) {
+    const composite = new Uint8ClampedArray(width * height * 4);
+    composite.fill(255);
+
+    for (let tileIndex = 0; tileIndex < parallelCount; tileIndex++) {
+      const laneOffset = Math.floor(tileIndex * packets.length / parallelCount);
+      const packetIndex = (frameIndex + laneOffset) % packets.length;
+      const matrix = generateQRMatrix(packets[packetIndex]!, qrVersion, eccLevel);
+      const imageData = rasterizeQR(matrix, scale);
+      const x = (tileIndex % layout.columns) * tileSize;
+      const y = Math.floor(tileIndex / layout.columns) * tileSize;
+      blitImageData(composite, width, imageData.data, imageData.width, imageData.height, x, y);
     }
-    frames.push(new Uint8Array(imageData.data.buffer));
+
+    frames.push(new Uint8Array(composite.buffer));
   }
 
   // ─── Create animated GIF ───────────────────────────────────────────────
@@ -105,4 +118,31 @@ function normalizeQRVersion(value: number | undefined): number {
 
 function normalizeEccLevel(value: EccLevel | undefined): EccLevel {
   return value ?? ECC_LEVEL;
+}
+
+function normalizeParallelQRCount(value: number | undefined): ParallelQRCount {
+  return value === 2 || value === 4 ? value : 1;
+}
+
+function getParallelLayout(parallelCount: ParallelQRCount): { columns: number; rows: number } {
+  if (parallelCount === 1) return { columns: 1, rows: 1 };
+  if (parallelCount === 2) return { columns: 2, rows: 1 };
+  return { columns: 2, rows: 2 };
+}
+
+function blitImageData(
+  target: Uint8ClampedArray,
+  targetWidth: number,
+  source: Uint8ClampedArray,
+  sourceWidth: number,
+  sourceHeight: number,
+  x: number,
+  y: number,
+): void {
+  for (let row = 0; row < sourceHeight; row++) {
+    const sourceStart = row * sourceWidth * 4;
+    const sourceEnd = sourceStart + sourceWidth * 4;
+    const targetStart = ((y + row) * targetWidth + x) * 4;
+    target.set(source.subarray(sourceStart, sourceEnd), targetStart);
+  }
 }

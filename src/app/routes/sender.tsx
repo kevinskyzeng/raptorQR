@@ -14,6 +14,7 @@ import {
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 type InputMode = 'text' | 'file';
+type ParallelQRCount = 1 | 2 | 4;
 
 interface GifResult {
   gifData: ArrayBuffer;
@@ -22,17 +23,23 @@ interface GifResult {
   frameCount: number;
   frameRateFps: number;
   frameDelayMs: number;
+  parallelCount: ParallelQRCount;
 }
 
 interface LiveTransfer {
   packets: Uint8Array[];
   width: number;
   height: number;
+  tileWidth: number;
+  tileHeight: number;
+  columns: number;
+  rows: number;
   version: number;
   eccLevel: QRTransferProfile['eccLevel'];
   symbolSize: number;
   scale: number;
-  frameCount: number;
+  displayFrameCount: number;
+  parallelCount: ParallelQRCount;
 }
 
 interface FrameCache {
@@ -47,6 +54,8 @@ type CSSProps = Record<string, string | number>;
 const MIN_FRAME_RATE_FPS = 2;
 const MAX_FRAME_RATE_FPS = 60;
 const DEFAULT_FRAME_RATE_FPS = 30;
+const DEFAULT_PARALLEL_QR_COUNT: ParallelQRCount = 1;
+const PARALLEL_QR_COUNTS: ParallelQRCount[] = [1, 2, 4];
 const LIVE_TARGET_PX = 360;
 const QR_QUIET_ZONE_MODULES = 4;
 const FRAME_CACHE_LIMIT = 120;
@@ -125,9 +134,10 @@ const S = {
     maxWidth: '100%',
   }),
   fullscreenPreview: {
-    width: 'min(100vw, 100vh)',
-    height: 'min(100vw, 100vh)',
+    width: '100vw',
+    height: '100vh',
     borderRadius: 0,
+    objectFit: 'contain',
   } as CSSProps,
   infoGrid: {
     display: 'grid',
@@ -207,6 +217,7 @@ export function SenderPage() {
   const [status, setStatus] = useState('');
   const [qrProfileId, setQrProfileId] = useState(DEFAULT_QR_PROFILE_ID);
   const [frameRateFps, setFrameRateFps] = useState(DEFAULT_FRAME_RATE_FPS);
+  const [parallelQRCount, setParallelQRCount] = useState<ParallelQRCount>(DEFAULT_PARALLEL_QR_COUNT);
   const [liveTransfer, setLiveTransfer] = useState<LiveTransfer | null>(null);
   const [gifResult, setGifResult] = useState<GifResult | null>(null);
   const [stats, setStats] = useState<{ originalSize: number; preprocessedSize: number; frameCount: number; totalGenerations: number } | null>(null);
@@ -240,9 +251,9 @@ export function SenderPage() {
       if (!transfer || !canvas) return;
 
       try {
-        const frameIndex = liveFrameIndexRef.current % transfer.frameCount;
+        const frameIndex = liveFrameIndexRef.current % transfer.displayFrameCount;
         drawLiveFrame(canvas, transfer, frameIndex, frameCacheRef.current);
-        liveFrameIndexRef.current = (frameIndex + 1) % transfer.frameCount;
+        liveFrameIndexRef.current = (frameIndex + 1) % transfer.displayFrameCount;
         scheduleNextLiveFrame();
       } catch (err: any) {
         clearPlaybackTimer();
@@ -262,9 +273,9 @@ export function SenderPage() {
       liveFrameIndexRef.current = 0;
     }
 
-    const frameIndex = liveFrameIndexRef.current % transfer.frameCount;
+    const frameIndex = liveFrameIndexRef.current % transfer.displayFrameCount;
     drawLiveFrame(canvas, transfer, frameIndex, frameCacheRef.current);
-    liveFrameIndexRef.current = (frameIndex + 1) % transfer.frameCount;
+    liveFrameIndexRef.current = (frameIndex + 1) % transfer.displayFrameCount;
     scheduleNextLiveFrame();
   }, [clearPlaybackTimer, scheduleNextLiveFrame]);
 
@@ -339,6 +350,11 @@ export function SenderPage() {
     }
   }, [startLivePlayback]);
 
+  const handleParallelQRCountChange = useCallback((value: string) => {
+    setParallelQRCount(normalizeParallelQRCount(Number(value)));
+    resetOutput();
+  }, [resetOutput]);
+
   const handleGenerate = useCallback(async () => {
     resetOutput();
 
@@ -406,8 +422,16 @@ export function SenderPage() {
         frameCount: encoded.stats.frameCount,
         totalGenerations: encoded.totalGenerations,
       });
-      setLiveTransfer(createLiveTransfer(encoded.packets, selectedQRProfile));
-      setStatus(`Live QR running (${encoded.stats.frameCount} frames). Preparing GIF download…`);
+      const nextLiveTransfer = createLiveTransfer(
+        encoded.packets,
+        selectedQRProfile,
+        parallelQRCount,
+      );
+      setLiveTransfer(nextLiveTransfer);
+      setStatus(
+        `Live QR running (${encoded.stats.frameCount} packets, ` +
+        `${nextLiveTransfer.parallelCount} per tick). Preparing GIF download…`,
+      );
 
       // ── Step 2: GIF worker ─────────────────────────────────────────
       const outputFrameRateFps = frameRateFpsRef.current;
@@ -429,6 +453,7 @@ export function SenderPage() {
               frameCount: e.data.frameCount,
               frameRateFps: outputFrameRateFps,
               frameDelayMs: outputFrameDelayMs,
+              parallelCount: parallelQRCount,
             });
           } else if (e.data.type === 'error') {
             reject(new Error(e.data.message));
@@ -442,6 +467,7 @@ export function SenderPage() {
             frameDelayMs: outputFrameDelayMs,
             qrVersion: selectedQRProfile.version,
             eccLevel: selectedQRProfile.eccLevel,
+            parallelCount: parallelQRCount,
           },
         );
       });
@@ -455,7 +481,7 @@ export function SenderPage() {
     } finally {
       setBusy(false);
     }
-  }, [mode, text, file, resetOutput, qrProfileId]);
+  }, [mode, text, file, resetOutput, qrProfileId, parallelQRCount]);
 
   const handleDownload = useCallback(() => {
     if (!gifResult) return;
@@ -554,6 +580,24 @@ export function SenderPage() {
             <span>Fast</span>
           </div>
         </div>
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ ...S.row, justifyContent: 'space-between', alignItems: 'baseline' }}>
+            <span style={S.label}>Parallel QR</span>
+            <span style={S.infoValue}>{parallelQRCount} per tick</span>
+          </div>
+          <select
+            value={parallelQRCount}
+            style={S.select}
+            disabled={busy}
+            onChange={(e) => handleParallelQRCountChange((e.target as HTMLSelectElement).value)}
+          >
+            {PARALLEL_QR_COUNTS.map((count) => (
+              <option key={count} value={count}>
+                {count} QR{count === 1 ? '' : 's'} per tick
+              </option>
+            ))}
+          </select>
+        </div>
         <button
           style={busy ? { ...S.btn, opacity: 0.6, cursor: 'not-allowed' } : S.btn}
           disabled={busy}
@@ -614,8 +658,10 @@ export function SenderPage() {
             <span style={S.infoValue}>{liveTransfer ? `V${liveTransfer.version}-${liveTransfer.eccLevel}` : qrProfile.label}</span>
             <span style={S.infoLabel}>Symbol payload</span>
             <span style={S.infoValue}>{liveTransfer ? `${liveTransfer.symbolSize} B/frame` : `${qrProfile.maxPayloadSize} B/frame`}</span>
-            <span style={S.infoLabel}>Frame count</span>
+            <span style={S.infoLabel}>QR packets</span>
             <span style={S.infoValue}>{stats.frameCount}</span>
+            <span style={S.infoLabel}>Parallel QR</span>
+            <span style={S.infoValue}>{liveTransfer ? `${liveTransfer.parallelCount} per tick` : `${parallelQRCount} per tick`}</span>
             <span style={S.infoLabel}>Live speed</span>
             <span style={S.infoValue}>{frameRateFps} fps ({formatDelayMs(frameDelayMs)} ms)</span>
             <span style={S.infoLabel}>GIF export speed</span>
@@ -644,6 +690,12 @@ function clampFrameRate(value: number): number {
   return Math.min(MAX_FRAME_RATE_FPS, Math.max(MIN_FRAME_RATE_FPS, Math.round(value)));
 }
 
+function normalizeParallelQRCount(value: number): ParallelQRCount {
+  return PARALLEL_QR_COUNTS.includes(value as ParallelQRCount)
+    ? value as ParallelQRCount
+    : DEFAULT_PARALLEL_QR_COUNT;
+}
+
 function frameRateToDelayMs(fps: number): number {
   return 1000 / clampFrameRate(fps);
 }
@@ -656,7 +708,11 @@ function createFrameCache(): FrameCache {
   return { frames: new Map(), maxEntries: FRAME_CACHE_LIMIT };
 }
 
-function createLiveTransfer(packets: Uint8Array[], profile: QRTransferProfile): LiveTransfer {
+function createLiveTransfer(
+  packets: Uint8Array[],
+  profile: QRTransferProfile,
+  parallelCount: ParallelQRCount,
+): LiveTransfer {
   if (packets.length === 0) {
     throw new Error('No QR packets were generated.');
   }
@@ -664,17 +720,23 @@ function createLiveTransfer(packets: Uint8Array[], profile: QRTransferProfile): 
   const moduleCount = profile.version * 4 + 17;
   const totalModules = moduleCount + QR_QUIET_ZONE_MODULES * 2;
   const scale = Math.max(2, Math.round(LIVE_TARGET_PX / totalModules));
-  const size = totalModules * scale;
+  const tileSize = totalModules * scale;
+  const layout = getParallelLayout(parallelCount);
 
   return {
     packets,
-    width: size,
-    height: size,
+    width: tileSize * layout.columns,
+    height: tileSize * layout.rows,
+    tileWidth: tileSize,
+    tileHeight: tileSize,
+    columns: layout.columns,
+    rows: layout.rows,
     version: profile.version,
     eccLevel: profile.eccLevel,
     symbolSize: profile.maxPayloadSize,
     scale,
-    frameCount: packets.length,
+    displayFrameCount: packets.length,
+    parallelCount,
   };
 }
 
@@ -691,15 +753,24 @@ function drawLiveFrame(
   if (!ctx) throw new Error('Canvas 2D context is unavailable.');
 
   ctx.imageSmoothingEnabled = false;
-  ctx.putImageData(getLiveFrameImage(transfer, frameIndex, cache), 0, 0);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, transfer.width, transfer.height);
+
+  for (let tileIndex = 0; tileIndex < transfer.parallelCount; tileIndex++) {
+    const packetIndex = getPacketIndexForDisplayFrame(transfer, frameIndex, tileIndex);
+    const image = getLivePacketImage(transfer, packetIndex, cache);
+    const x = (tileIndex % transfer.columns) * transfer.tileWidth;
+    const y = Math.floor(tileIndex / transfer.columns) * transfer.tileHeight;
+    ctx.putImageData(image, x, y);
+  }
 }
 
-function getLiveFrameImage(
+function getLivePacketImage(
   transfer: LiveTransfer,
-  frameIndex: number,
+  packetIndex: number,
   cache: FrameCache,
 ): ImageData {
-  const cacheKey = frameIndex % transfer.frameCount;
+  const cacheKey = packetIndex % transfer.packets.length;
   const cached = cache.frames.get(cacheKey);
   if (cached) return cached;
 
@@ -720,4 +791,19 @@ function getLiveFrameImage(
   }
 
   return image;
+}
+
+function getParallelLayout(parallelCount: ParallelQRCount): { columns: number; rows: number } {
+  if (parallelCount === 1) return { columns: 1, rows: 1 };
+  if (parallelCount === 2) return { columns: 2, rows: 1 };
+  return { columns: 2, rows: 2 };
+}
+
+function getPacketIndexForDisplayFrame(
+  transfer: LiveTransfer,
+  frameIndex: number,
+  tileIndex: number,
+): number {
+  const laneOffset = Math.floor(tileIndex * transfer.packets.length / transfer.parallelCount);
+  return (frameIndex + laneOffset) % transfer.packets.length;
 }

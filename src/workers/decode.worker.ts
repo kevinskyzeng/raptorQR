@@ -6,7 +6,10 @@
  */
 
 import { inflateSync } from 'fflate';
-import { decodeQRFromCanvas } from '@/core/qr/qr_decode';
+import {
+  decodeQRCodesFromCanvas,
+  type QrDecodeResult,
+} from '@/core/qr/qr_decode';
 import { parsePacket } from '@/core/protocol/packet';
 import type { Packet } from '@/core/protocol/packet';
 import { K, sourceGenerationsFromTotal } from '@/core/protocol/constants';
@@ -41,6 +44,7 @@ interface QueuedFrame {
 }
 
 const MAX_REALTIME_FRAME_QUEUE = 60;
+const MAX_QR_SYMBOLS_PER_FRAME = 4;
 
 let current: DecodeState | null = null;
 let frameQueue: QueuedFrame[] = [];
@@ -118,16 +122,37 @@ async function processFrameQueue(): Promise<void> {
 }
 
 async function handleFrame(imageData: ImageData): Promise<void> {
-  const decoded = await decodeQRFromCanvas(imageData);
-  if (!decoded) return;
+  const decodedSymbols = await decodeQRCodesFromCanvas(imageData, MAX_QR_SYMBOLS_PER_FRAME);
+  if (decodedSymbols.length === 0) return;
 
-  let packet: Packet;
-  try {
-    packet = parsePacket(decoded.bytes);
-  } catch {
-    return;
+  let processedPackets = 0;
+  for (const decoded of decodedSymbols) {
+    let packet: Packet;
+    try {
+      packet = parsePacket(decoded.bytes);
+    } catch {
+      continue;
+    }
+
+    processDecodedPacket(decoded, packet, processedPackets === 0);
+    processedPackets++;
+
+    if (current?.completed) {
+      reportProgress(current);
+      return;
+    }
   }
 
+  if (current && processedPackets > 0) {
+    reportProgress(current);
+  }
+}
+
+function processDecodedPacket(
+  decoded: QrDecodeResult,
+  packet: Packet,
+  countFrame: boolean,
+): void {
   const h = packet.header;
 
   // Start fresh on first valid packet
@@ -153,6 +178,10 @@ async function handleFrame(imageData: ImageData): Promise<void> {
 
   if (current.completed) return;
 
+  if (countFrame) {
+    current.stats.totalFrames++;
+  }
+
   if (packet.payload.length !== current.symbolSize) {
     throw new Error(
       `QR payload size changed from ${current.symbolSize} to ${packet.payload.length} bytes. ` +
@@ -168,7 +197,6 @@ async function handleFrame(imageData: ImageData): Promise<void> {
   current.isText = h.isText;
   current.isCompressed = h.compressed;
 
-  current.stats.totalFrames++;
   current.stats.framesWithQR++;
 
   // Dedup: generationIndex:symbolIndex
@@ -197,15 +225,10 @@ async function handleFrame(imageData: ImageData): Promise<void> {
       // We only need sourceGenerations generations solved (any mix of source + parity)
       if (current.solvedGenerations.size >= current.sourceGenerations) {
         reconstructData(current);
-        if (current.completed) {
-          reportProgress(current);
-          return;
-        }
+        if (current.completed) return;
       }
     }
   }
-
-  reportProgress(current);
 }
 
 // ─── Reconstruct original data from all source symbols ────────────────────────

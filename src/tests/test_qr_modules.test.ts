@@ -1,6 +1,6 @@
 import { generateQRMatrix, getMaxByteCapacity, getMinVersion } from '../core/qr/qr_encode.ts';
 import { rasterizeQR, rasterizeToGrayscale, getRasterDimensions } from '../core/qr/frame_raster.ts';
-import { decodeQRFromBuffer } from '../core/qr/qr_decode.ts';
+import { decodeQRFromBuffer, decodeQRCodesFromCanvas } from '../core/qr/qr_decode.ts';
 import { createQRGif, estimateGifSize } from '../core/gif/gif_render.ts';
 import { describe, it, expect } from 'vitest';
 
@@ -48,6 +48,36 @@ describe('Frame raster', () => {
     expect(decoded).not.toBeNull();
     expect(decoded!.version).toBe(1);
     expect(new TextDecoder().decode(decoded!.bytes)).toBe(original);
+  });
+
+  it('should decode multiple QR codes from one image', async () => {
+    const payloads = ['left QR', 'right QR'];
+    const images = payloads.map((text) => {
+      const matrix = generateQRMatrix(new TextEncoder().encode(text), 1, 'L');
+      return rasterizeQR(matrix, 4);
+    });
+    const tileWidth = images[0]!.width;
+    const tileHeight = images[0]!.height;
+    const width = tileWidth * images.length;
+    const height = tileHeight;
+    const composite = new Uint8ClampedArray(width * height * 4);
+    composite.fill(255);
+
+    images.forEach((image, tileIndex) => {
+      for (let row = 0; row < tileHeight; row++) {
+        const sourceStart = row * tileWidth * 4;
+        const sourceEnd = sourceStart + tileWidth * 4;
+        const targetStart = (row * width + tileIndex * tileWidth) * 4;
+        composite.set(image.data.subarray(sourceStart, sourceEnd), targetStart);
+      }
+    });
+
+    const decoded = await decodeQRCodesFromCanvas(new ImageData(composite, width, height), 2);
+    const texts = decoded
+      .map((result) => new TextDecoder().decode(result.bytes))
+      .sort();
+
+    expect(texts).toEqual([...payloads].sort());
   });
 });
 
