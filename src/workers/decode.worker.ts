@@ -10,6 +10,11 @@ import {
   decodeQRCodesFromCanvas,
   type QrDecodeResult,
 } from '@/core/qr/qr_decode';
+import {
+  DEFAULT_DECODE_SETTINGS,
+  normalizeDecodeSettings,
+  type QrDecodeSettings,
+} from '@/core/qr/decode_settings';
 import { parsePacket } from '@/core/protocol/packet';
 import type { Packet } from '@/core/protocol/packet';
 import { K, sourceGenerationsFromDataLength } from '@/core/protocol/constants';
@@ -49,6 +54,7 @@ const MAX_QR_SYMBOLS_PER_FRAME = 4;
 let current: DecodeState | null = null;
 let frameQueue: QueuedFrame[] = [];
 let processingQueue = false;
+let decodeSettings: QrDecodeSettings = DEFAULT_DECODE_SETTINGS;
 
 // ─── Worker handler ───────────────────────────────────────────────────────────
 
@@ -58,6 +64,11 @@ self.onmessage = (e: MessageEvent) => {
   if (msg.type === 'reset') {
     current = null;
     frameQueue = [];
+    return;
+  }
+
+  if (msg.type === 'settings') {
+    decodeSettings = normalizeDecodeSettings(msg.settings);
     return;
   }
 
@@ -122,7 +133,10 @@ async function processFrameQueue(): Promise<void> {
 }
 
 async function handleFrame(imageData: ImageData): Promise<void> {
-  const decodedSymbols = await decodeQRCodesFromCanvas(imageData, MAX_QR_SYMBOLS_PER_FRAME);
+  const decodedSymbols = await decodeQRCodesFromCanvas(imageData, {
+    ...decodeSettings,
+    maxSymbols: maxSymbolsForNextScan(),
+  });
   if (decodedSymbols.length === 0) return;
 
   let processedPackets = 0;
@@ -146,6 +160,13 @@ async function handleFrame(imageData: ImageData): Promise<void> {
   if (current && processedPackets > 0) {
     reportProgress(current);
   }
+}
+
+function maxSymbolsForNextScan(): number {
+  if (decodeSettings.maxSymbols !== 'auto') {
+    return decodeSettings.maxSymbols;
+  }
+  return MAX_QR_SYMBOLS_PER_FRAME;
 }
 
 function processDecodedPacket(

@@ -11,22 +11,39 @@ import {
   type ReaderOptions,
 } from 'zxing-wasm/reader';
 import zxingReaderWasmUrl from 'zxing-wasm/reader/zxing_reader.wasm?url';
+import {
+  DECODE_PRESETS,
+  DEFAULT_DECODE_SETTINGS,
+  normalizeDecodeSettings,
+  type QrDecodeSettings,
+} from '@/core/qr/decode_settings';
 
 export interface QrDecodeResult {
   bytes: Uint8Array;
   version: number;
 }
 
+export type QrDecodeOptions = Partial<Omit<QrDecodeSettings, 'maxSymbols'>> & {
+  maxSymbols?: number;
+};
+
 const READER_OPTIONS: ReaderOptions = {
   formats: ['QRCode'],
-  tryHarder: true,
-  tryRotate: false,
-  tryInvert: true,
-  tryDownscale: true,
+  binarizer: DEFAULT_DECODE_SETTINGS.binarizer,
+  tryHarder: DEFAULT_DECODE_SETTINGS.tryHarder,
+  tryRotate: DEFAULT_DECODE_SETTINGS.tryRotate,
+  tryInvert: DEFAULT_DECODE_SETTINGS.tryInvert,
+  tryDownscale: DEFAULT_DECODE_SETTINGS.tryDownscale,
+  downscaleFactor: DEFAULT_DECODE_SETTINGS.downscaleFactor,
   textMode: 'Plain',
 };
 
 const DEFAULT_MAX_QR_SYMBOLS = 4;
+const SINGLE_QR_DECODE_OPTIONS: Required<QrDecodeOptions> = {
+  ...DEFAULT_DECODE_SETTINGS,
+  ...DECODE_PRESETS.robust,
+  maxSymbols: 1,
+};
 
 let preparePromise: Promise<unknown> | null = null;
 
@@ -41,7 +58,8 @@ let preparePromise: Promise<unknown> | null = null;
 export function decodeQRFromCanvas(
   imageData: ImageData,
 ): Promise<QrDecodeResult | null> {
-  return decodeImageData(imageData, 1).then((results) => results[0] ?? null);
+  return decodeImageData(imageData, SINGLE_QR_DECODE_OPTIONS)
+    .then((results) => results[0] ?? null);
 }
 
 /**
@@ -49,9 +67,9 @@ export function decodeQRFromCanvas(
  */
 export function decodeQRCodesFromCanvas(
   imageData: ImageData,
-  maxSymbols: number = DEFAULT_MAX_QR_SYMBOLS,
+  options: number | QrDecodeOptions = DEFAULT_MAX_QR_SYMBOLS,
 ): Promise<QrDecodeResult[]> {
-  return decodeImageData(imageData, maxSymbols);
+  return decodeImageData(imageData, normalizeDecodeOptions(options));
 }
 
 /**
@@ -88,18 +106,24 @@ export function decodeQRFromBuffer(
     rgba[off + 3] = 255; // A
   }
 
-  return decodeImageData(new ImageData(rgba, width, height), 1)
+  return decodeImageData(new ImageData(rgba, width, height), SINGLE_QR_DECODE_OPTIONS)
     .then((results) => results[0] ?? null);
 }
 
 async function decodeImageData(
   imageData: ImageData,
-  maxSymbols: number,
+  options: Required<QrDecodeOptions>,
 ): Promise<QrDecodeResult[]> {
   await prepareReader();
   const results = await readBarcodes(imageData, {
     ...READER_OPTIONS,
-    maxNumberOfSymbols: clampMaxSymbols(maxSymbols),
+    binarizer: options.binarizer,
+    tryHarder: options.tryHarder,
+    tryRotate: options.tryRotate,
+    tryInvert: options.tryInvert,
+    tryDownscale: options.tryDownscale,
+    downscaleFactor: options.downscaleFactor,
+    maxNumberOfSymbols: clampMaxSymbols(options.maxSymbols),
   });
 
   return results
@@ -147,4 +171,20 @@ function parseQRVersion(version: string, extra: string): number {
 function clampMaxSymbols(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_MAX_QR_SYMBOLS;
   return Math.min(DEFAULT_MAX_QR_SYMBOLS, Math.max(1, Math.round(value)));
+}
+
+function normalizeDecodeOptions(options: number | QrDecodeOptions): Required<QrDecodeOptions> {
+  if (typeof options === 'number') {
+    return {
+      ...DEFAULT_DECODE_SETTINGS,
+      maxSymbols: clampMaxSymbols(options),
+    };
+  }
+
+  const { maxSymbols, ...readerSettings } = options;
+  const normalizedSettings = normalizeDecodeSettings(readerSettings);
+  return {
+    ...normalizedSettings,
+    maxSymbols: clampMaxSymbols(maxSymbols ?? DEFAULT_MAX_QR_SYMBOLS),
+  };
 }

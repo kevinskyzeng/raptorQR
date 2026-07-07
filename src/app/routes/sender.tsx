@@ -3,12 +3,16 @@
  */
 import { useState, useCallback, useEffect, useRef } from 'preact/hooks';
 import { generateQRMatrix } from '@/core/qr/qr_encode';
+import type { EccLevel } from '@/core/qr/qr_encode';
 import { rasterizeQR } from '@/core/qr/frame_raster';
 import {
-  DEFAULT_QR_PROFILE_ID,
-  getQRTransferProfile,
-  QR_TRANSFER_PROFILES,
+  DEFAULT_QR_ECC_LEVEL,
+  DEFAULT_QR_VERSION,
+  ECC_LEVEL_OPTIONS,
+  QR_VERSION_OPTIONS,
+  createQRTransferProfile,
   type QRTransferProfile,
+  type QRVersionOption,
 } from '@/core/protocol/profiles';
 import {
   stripedFrameCount,
@@ -39,7 +43,7 @@ interface LiveTransfer {
   columns: number;
   rows: number;
   version: number;
-  eccLevel: QRTransferProfile['eccLevel'];
+  eccLevel: EccLevel;
   symbolSize: number;
   scale: number;
   displayFrameCount: number;
@@ -219,7 +223,8 @@ export function SenderPage() {
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('');
-  const [qrProfileId, setQrProfileId] = useState(DEFAULT_QR_PROFILE_ID);
+  const [qrVersion, setQrVersion] = useState<QRVersionOption>(DEFAULT_QR_VERSION);
+  const [eccLevel, setEccLevel] = useState<EccLevel>(DEFAULT_QR_ECC_LEVEL);
   const [frameRateFps, setFrameRateFps] = useState(DEFAULT_FRAME_RATE_FPS);
   const [parallelQRCount, setParallelQRCount] = useState<ParallelQRCount>(DEFAULT_PARALLEL_QR_COUNT);
   const [liveTransfer, setLiveTransfer] = useState<LiveTransfer | null>(null);
@@ -235,7 +240,7 @@ export function SenderPage() {
   const liveFrameIndexRef = useRef(0);
   const frameRateFpsRef = useRef(DEFAULT_FRAME_RATE_FPS);
   const frameCacheRef = useRef<FrameCache>(createFrameCache());
-  const qrProfile = getQRTransferProfile(qrProfileId);
+  const qrProfile = createQRTransferProfile(qrVersion, eccLevel);
   const frameDelayMs = frameRateToDelayMs(frameRateFps);
 
   const clearPlaybackTimer = useCallback(() => {
@@ -340,8 +345,13 @@ export function SenderPage() {
     resetOutput();
   }, [resetOutput]);
 
-  const handleQRProfileChange = useCallback((value: string) => {
-    setQrProfileId(value);
+  const handleQRVersionChange = useCallback((value: string) => {
+    setQrVersion(parseQRVersionOption(value));
+    resetOutput();
+  }, [resetOutput]);
+
+  const handleEccLevelChange = useCallback((value: string) => {
+    setEccLevel(normalizeEccLevel(value));
     resetOutput();
   }, [resetOutput]);
 
@@ -378,7 +388,7 @@ export function SenderPage() {
     }
 
     const compress = data.byteLength > 64;
-    const selectedQRProfile = getQRTransferProfile(qrProfileId);
+    const selectedQRProfile = createQRTransferProfile(qrVersion, eccLevel);
 
     setBusy(true);
     setStatus('Encoding data…');
@@ -485,7 +495,7 @@ export function SenderPage() {
     } finally {
       setBusy(false);
     }
-  }, [mode, text, file, resetOutput, qrProfileId, parallelQRCount]);
+  }, [mode, text, file, resetOutput, qrVersion, eccLevel, parallelQRCount]);
 
   const handleDownload = useCallback(() => {
     if (!gifResult) return;
@@ -553,16 +563,40 @@ export function SenderPage() {
             <span style={S.infoValue}>{qrProfile.maxPayloadSize} B/frame</span>
           </div>
           <select
-            value={qrProfileId}
+            value={qrVersion}
             style={S.select}
             disabled={busy}
-            onChange={(e) => handleQRProfileChange((e.target as HTMLSelectElement).value)}
+            onChange={(e) => handleQRVersionChange((e.target as HTMLSelectElement).value)}
           >
-            {QR_TRANSFER_PROFILES.map((profile) => (
-              <option key={profile.id} value={profile.id}>
-                {profile.label} · {profile.maxPayloadSize} B/frame
-              </option>
-            ))}
+            {QR_VERSION_OPTIONS.map((version) => {
+              const profile = createQRTransferProfile(version, eccLevel);
+              return (
+                <option key={version} value={version}>
+                  V{version} · {profile.maxPayloadSize} B/frame
+                </option>
+              );
+            })}
+          </select>
+        </div>
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ ...S.row, justifyContent: 'space-between', alignItems: 'baseline' }}>
+            <span style={S.label}>QR ECC</span>
+            <span style={S.infoValue}>{eccLevel}</span>
+          </div>
+          <select
+            value={eccLevel}
+            style={S.select}
+            disabled={busy}
+            onChange={(e) => handleEccLevelChange((e.target as HTMLSelectElement).value)}
+          >
+            {ECC_LEVEL_OPTIONS.map((level) => {
+              const profile = createQRTransferProfile(qrVersion, level);
+              return (
+                <option key={level} value={level}>
+                  {formatEccLevel(level)} · {profile.maxPayloadSize} B/frame
+                </option>
+              );
+            })}
           </select>
         </div>
         <div style={{ marginBottom: 16 }}>
@@ -698,6 +732,32 @@ function normalizeParallelQRCount(value: number): ParallelQRCount {
   return PARALLEL_QR_COUNTS.includes(value as ParallelQRCount)
     ? value as ParallelQRCount
     : DEFAULT_PARALLEL_QR_COUNT;
+}
+
+function parseQRVersionOption(value: string): QRVersionOption {
+  const parsed = Number(value);
+  return QR_VERSION_OPTIONS.includes(parsed as QRVersionOption)
+    ? parsed as QRVersionOption
+    : DEFAULT_QR_VERSION;
+}
+
+function normalizeEccLevel(value: string): EccLevel {
+  return ECC_LEVEL_OPTIONS.includes(value as EccLevel)
+    ? value as EccLevel
+    : DEFAULT_QR_ECC_LEVEL;
+}
+
+function formatEccLevel(level: EccLevel): string {
+  switch (level) {
+    case 'L':
+      return 'L - low';
+    case 'M':
+      return 'M - medium';
+    case 'Q':
+      return 'Q - quartile';
+    case 'H':
+      return 'H - high';
+  }
 }
 
 function frameRateToDelayMs(fps: number): number {

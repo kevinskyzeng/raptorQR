@@ -4,6 +4,19 @@
  */
 import { useState, useCallback, useRef, useEffect } from 'preact/hooks';
 import { parseGif, renderGifFrame } from '@/core/gif/gif_parser';
+import {
+  BINARIZER_OPTIONS,
+  DECODE_PRESETS,
+  DEFAULT_DECODE_PRESET,
+  DEFAULT_DECODE_SETTINGS,
+  DOWNSCALE_FACTOR_OPTIONS,
+  MAX_SYMBOL_OPTIONS,
+  type DecodePresetId,
+  type DownscaleFactor,
+  type MaxSymbolsMode,
+  type QrBinarizer,
+  type QrDecodeSettings,
+} from '@/core/qr/decode_settings';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -22,6 +35,7 @@ const MIN_SCAN_RATE_FPS = 2;
 const MAX_SCAN_RATE_FPS = 60;
 const DEFAULT_SCAN_RATE_FPS = 60;
 const DECODE_RATE_WINDOW_MS = 1000;
+const DECODE_PRESET_OPTIONS: DecodePresetId[] = ['fast', 'balance', 'robust', 'custom'];
 
 const S = {
   section: {
@@ -65,6 +79,24 @@ const S = {
     fontSize: 15,
     fontWeight: 600,
     cursor: 'pointer',
+  } as CSSProps,
+  btnSecondary: {
+    background: '#21262d',
+    color: '#c9d1d9',
+    border: '1px solid #30363d',
+    borderRadius: 6,
+    padding: '10px 16px',
+    fontSize: 14,
+    cursor: 'pointer',
+  } as CSSProps,
+  select: {
+    width: '100%',
+    background: '#0d1117',
+    color: '#c9d1d9',
+    border: '1px solid #30363d',
+    borderRadius: 6,
+    padding: '9px 10px',
+    fontSize: 14,
   } as CSSProps,
   video: {
     width: '100%',
@@ -151,6 +183,13 @@ const S = {
     resize: 'vertical' as const,
     minHeight: 120,
   } as CSSProps,
+  checkboxLabel: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    color: '#c9d1d9',
+    fontSize: 13,
+  } as CSSProps,
 };
 
 // ─── Component ───────────────────────────────────────────────────────────────────
@@ -181,6 +220,9 @@ export function ReceiverPage() {
   const [zoomLevel, setZoomLevel] = useState(1);
   const [hasZoomSupport, setHasZoomSupport] = useState(false);
   const [scanRateFps, setScanRateFps] = useState(DEFAULT_SCAN_RATE_FPS);
+  const [decodePreset, setDecodePreset] = useState<DecodePresetId>(DEFAULT_DECODE_PRESET);
+  const [decodeSettings, setDecodeSettings] = useState<QrDecodeSettings>(DEFAULT_DECODE_SETTINGS);
+  const [advancedDecodeOpen, setAdvancedDecodeOpen] = useState(false);
   const [decodedQrPerSecond, setDecodedQrPerSecond] = useState(0);
   const [detectedQrVersion, setDetectedQrVersion] = useState(0);
   const [detectedSymbolSize, setDetectedSymbolSize] = useState(0);
@@ -192,12 +234,18 @@ export function ReceiverPage() {
   const dataLengthRef = useRef<number>(0);
   const decodedQrCountRef = useRef(0);
   const decodedQrRateSamplesRef = useRef<DecodeRateSample[]>([]);
+  const decodeSettingsRef = useRef<QrDecodeSettings>(DEFAULT_DECODE_SETTINGS);
   const scanIntervalMs = scanRateToIntervalMs(scanRateFps);
   const scanIntervalMsRef = useRef(scanIntervalMs);
 
   useEffect(() => {
     scanIntervalMsRef.current = scanIntervalMs;
   }, [scanIntervalMs]);
+
+  useEffect(() => {
+    decodeSettingsRef.current = decodeSettings;
+    workerRef.current?.postMessage({ type: 'settings', settings: decodeSettings });
+  }, [decodeSettings]);
 
   const updateDecodedQrRate = useCallback((decodedCount: number) => {
     const now = Date.now();
@@ -349,6 +397,32 @@ export function ReceiverPage() {
     setScanRateFps(clampScanRate(Number(value)));
   }, []);
 
+  const handleDecodePresetChange = useCallback((value: string) => {
+    const preset = normalizeDecodePreset(value);
+    setDecodePreset(preset);
+    if (preset === 'custom') return;
+
+    setDecodeSettings((current) => ({
+      ...current,
+      ...DECODE_PRESETS[preset],
+    }));
+  }, []);
+
+  const updateDecodePresetField = useCallback((
+    key: 'binarizer' | 'tryHarder' | 'tryRotate' | 'tryInvert',
+    value: QrBinarizer | boolean,
+  ) => {
+    setDecodePreset('custom');
+    setDecodeSettings((current) => ({ ...current, [key]: value }));
+  }, []);
+
+  const updateDecodeAdvancedField = useCallback((
+    key: 'maxSymbols' | 'tryDownscale' | 'downscaleFactor',
+    value: MaxSymbolsMode | boolean | DownscaleFactor,
+  ) => {
+    setDecodeSettings((current) => ({ ...current, [key]: value }));
+  }, []);
+
   // ── Start camera scanning ───────────────────────────────────────────────
   const startCameraScanning = useCallback(async () => {
     setError('');
@@ -403,6 +477,7 @@ export function ReceiverPage() {
       }
 
       const worker = createWorker();
+      worker.postMessage({ type: 'settings', settings: decodeSettingsRef.current });
       workerRef.current = worker;
 
       setScanning(true);
@@ -452,6 +527,7 @@ export function ReceiverPage() {
     decodedQrRateSamplesRef.current = [];
 
     const worker = createWorker();
+    worker.postMessage({ type: 'settings', settings: decodeSettingsRef.current });
     workerRef.current = worker;
 
     setScanning(true);
@@ -593,6 +669,129 @@ export function ReceiverPage() {
             🎞️ GIF File
           </button>
         </div>
+      </div>
+
+      <div style={S.section}>
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ ...S.row, justifyContent: 'space-between', alignItems: 'baseline' }}>
+            <span style={S.label}>Decode preset</span>
+            <span style={S.statValue}>{formatDecodePreset(decodePreset)}</span>
+          </div>
+          <select
+            value={decodePreset}
+            style={S.select}
+            onChange={(e) => handleDecodePresetChange((e.target as HTMLSelectElement).value)}
+          >
+            {DECODE_PRESET_OPTIONS.map((preset) => (
+              <option key={preset} value={preset}>
+                {formatDecodePreset(preset)}
+              </option>
+            ))}
+          </select>
+        </div>
+        <button
+          type="button"
+          style={S.btnSecondary}
+          onClick={() => setAdvancedDecodeOpen((open) => !open)}
+        >
+          {advancedDecodeOpen ? 'Hide advanced settings' : 'Advanced settings'}
+        </button>
+        {advancedDecodeOpen && (
+          <div style={{ marginTop: 14, display: 'grid', gap: 12 }}>
+            <label>
+              <span style={S.label}>Max symbols</span>
+              <select
+                value={String(decodeSettings.maxSymbols)}
+                style={S.select}
+                onChange={(e) => {
+                  updateDecodeAdvancedField(
+                    'maxSymbols',
+                    parseMaxSymbolsMode((e.target as HTMLSelectElement).value),
+                  );
+                }}
+              >
+                {MAX_SYMBOL_OPTIONS.map((value) => (
+                  <option key={String(value)} value={String(value)}>
+                    {formatMaxSymbols(value)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span style={S.label}>Binarizer</span>
+              <select
+                value={decodeSettings.binarizer}
+                style={S.select}
+                onChange={(e) => {
+                  updateDecodePresetField(
+                    'binarizer',
+                    normalizeBinarizer((e.target as HTMLSelectElement).value),
+                  );
+                }}
+              >
+                {BINARIZER_OPTIONS.map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div style={S.row}>
+              <label style={S.checkboxLabel}>
+                <input
+                  type="checkbox"
+                  checked={decodeSettings.tryHarder}
+                  onChange={(e) => updateDecodePresetField('tryHarder', (e.target as HTMLInputElement).checked)}
+                />
+                tryHarder
+              </label>
+              <label style={S.checkboxLabel}>
+                <input
+                  type="checkbox"
+                  checked={decodeSettings.tryRotate}
+                  onChange={(e) => updateDecodePresetField('tryRotate', (e.target as HTMLInputElement).checked)}
+                />
+                tryRotate
+              </label>
+              <label style={S.checkboxLabel}>
+                <input
+                  type="checkbox"
+                  checked={decodeSettings.tryInvert}
+                  onChange={(e) => updateDecodePresetField('tryInvert', (e.target as HTMLInputElement).checked)}
+                />
+                tryInvert
+              </label>
+              <label style={S.checkboxLabel}>
+                <input
+                  type="checkbox"
+                  checked={decodeSettings.tryDownscale}
+                  onChange={(e) => updateDecodeAdvancedField('tryDownscale', (e.target as HTMLInputElement).checked)}
+                />
+                tryDownscale
+              </label>
+            </div>
+            <label>
+              <span style={S.label}>Downscale factor</span>
+              <select
+                value={String(decodeSettings.downscaleFactor)}
+                style={S.select}
+                disabled={!decodeSettings.tryDownscale}
+                onChange={(e) => {
+                  updateDecodeAdvancedField(
+                    'downscaleFactor',
+                    parseDownscaleFactor((e.target as HTMLSelectElement).value),
+                  );
+                }}
+              >
+                {DOWNSCALE_FACTOR_OPTIONS.map((value) => (
+                  <option key={value} value={String(value)}>
+                    {value}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        )}
       </div>
 
       {/* ── Camera preview ────────────────────────────────────────────────── */}
@@ -856,6 +1055,40 @@ function scanRateToIntervalMs(fps: number): number {
 
 function formatDelayMs(ms: number): string {
   return Number.isInteger(ms) ? String(ms) : ms.toFixed(1);
+}
+
+function normalizeDecodePreset(value: string): DecodePresetId {
+  return DECODE_PRESET_OPTIONS.includes(value as DecodePresetId)
+    ? value as DecodePresetId
+    : DEFAULT_DECODE_PRESET;
+}
+
+function formatDecodePreset(value: DecodePresetId): string {
+  if (value === 'fast') return 'Fast';
+  if (value === 'balance') return 'Balance';
+  if (value === 'robust') return 'Robust';
+  return 'Custom';
+}
+
+function parseMaxSymbolsMode(value: string): MaxSymbolsMode {
+  if (value === 'auto') return 'auto';
+  const parsed = Number(value);
+  return parsed === 1 || parsed === 2 || parsed === 4 ? parsed : DEFAULT_DECODE_SETTINGS.maxSymbols;
+}
+
+function formatMaxSymbols(value: MaxSymbolsMode): string {
+  return value === 'auto' ? 'Auto' : String(value);
+}
+
+function normalizeBinarizer(value: string): QrBinarizer {
+  return BINARIZER_OPTIONS.includes(value as QrBinarizer)
+    ? value as QrBinarizer
+    : DEFAULT_DECODE_SETTINGS.binarizer;
+}
+
+function parseDownscaleFactor(value: string): DownscaleFactor {
+  const parsed = Number(value);
+  return parsed === 2 || parsed === 3 || parsed === 4 ? parsed : DEFAULT_DECODE_SETTINGS.downscaleFactor;
 }
 
 function getCameraUnavailableMessage(): string {
