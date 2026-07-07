@@ -4,7 +4,7 @@ Transfer files and text between devices by displaying an animated sequence of QR
 
 No network, no Bluetooth, no cables. Everything runs locally in the browser or terminal.
 
-**Live demo:** https://hermitm0nk.github.io/qr-stream/
+**Live demo:** https://qr.linkto.host/
 
 ---
 
@@ -40,7 +40,7 @@ Measured examples:
 | 95.2 KB file transfer (V30-L x 4QR@30fps)|       375 ms, about 254.0 KB/s |
 | 3.0 MB file transfer  (V30-L x 4QR@15fps)|                  about 45 KB/s |
 
-The 95.2 KB test was measured on **iPhone 16 + Safari**. Actual speed depends on device camera quality, browser performance, lighting, QR size, QR version, playback rate, and scan settings.
+The 95.2 KB & 3.0MB file test was measured on **iPhone 16 + Safari**. Actual speed depends on device camera quality, browser performance, lighting, QR size, QR version, playback rate, and scan settings.
 
 The new version also supports larger file transfers more reliably, including fixes for the previous `GF(256) division by zero` issue and other algorithmic edge cases.
 
