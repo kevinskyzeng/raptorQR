@@ -37,8 +37,8 @@ Measured examples:
 | ---------------------------------------- | -----------------------------: |
 | V20 QR, 4-code parallel playback, 30 FPS | up to 300 decoded QR symbols/s |
 | V30 QR                                   |      100+ decoded QR symbols/s |
-| 95.2 KB file transfer                    |       375 ms, about 254.0 KB/s |
-| 1.8 MB file transfer                     |                  about 40 KB/s |
+| 95.2 KB file transfer (V30-L x 4QR@30fps)|       375 ms, about 254.0 KB/s |
+| 3.0 MB file transfer  (V30-L x 4QR@15fps)|                  about 45 KB/s |
 
 The 95.2 KB test was measured on **iPhone 16 + Safari**. Actual speed depends on device camera quality, browser performance, lighting, QR size, QR version, playback rate, and scan settings.
 
